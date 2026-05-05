@@ -54,6 +54,7 @@ backend/__pycache__/
 .env.test.local
 .env.production.local
 *.env
+!.env.example
 
 # IDE and OS-specific files
 .vscode/*
