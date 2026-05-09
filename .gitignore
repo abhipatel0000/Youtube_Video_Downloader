@@ -55,6 +55,8 @@ backend/__pycache__/
 .env.production.local
 *.env
 !.env.example
+cookies.txt
+
 
 # IDE and OS-specific files
 .vscode/*
