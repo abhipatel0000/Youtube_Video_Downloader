@@ -11,32 +11,30 @@ import threading
 from utils import get_video_info, download_video
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 app = FastAPI(title="QuickTube API")
 
+# ── CORS ───────────────────────────────────────────────────────────
+# allow_credentials MUST be False when allow_origins=["*"]
+# Using wildcard so no env var misconfiguration can break this
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # allows all origins
-    allow_credentials=False,  # must be False when using wildcard
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Ensure downloads directory exists
+# ── Downloads directory ────────────────────────────────────────────
 DOWNLOADS_DIR = os.getenv("DOWNLOADS_DIR", "downloads")
-if not os.path.exists(DOWNLOADS_DIR):
-    os.makedirs(DOWNLOADS_DIR)
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
-# ------------------------------------------------------------------
-# In-memory progress store
-# { download_id: { "status": "...", "percent": 0-100, "speed": "...",
-#                  "eta": "...", "file_path": "...", "error": "..." } }
-# ------------------------------------------------------------------
+# ── In-memory progress store ───────────────────────────────────────
 progress_store: dict[str, dict] = {}
 
 
+# ── Pydantic models ────────────────────────────────────────────────
 class URLRequest(BaseModel):
     url: str
 
@@ -48,8 +46,7 @@ class DownloadRequest(BaseModel):
     title: str
 
 
-# ── helpers ────────────────────────────────────────────────────────
-
+# ── Helpers ────────────────────────────────────────────────────────
 def cleanup_file(path: str):
     """Delete file after a delay to ensure transfer is complete."""
     time.sleep(180)
@@ -62,7 +59,6 @@ def cleanup_file(path: str):
 
 
 def _fmt_speed(bps: float) -> str:
-    """Format bytes/s into a human-readable speed string."""
     if not bps:
         return ""
     if bps >= 1024 ** 2:
@@ -73,7 +69,6 @@ def _fmt_speed(bps: float) -> str:
 
 
 def _fmt_eta(secs) -> str:
-    """Format seconds into MM:SS string."""
     try:
         secs = int(secs)
     except (TypeError, ValueError):
@@ -83,12 +78,8 @@ def _fmt_eta(secs) -> str:
     return f"{secs // 60:02d}:{secs % 60:02d}"
 
 
-def run_download_thread(download_id: str, url: str, format_id: str, output_path: str, is_audio: bool):
-    """Runs the yt-dlp download in a background thread, updating progress_store."""
-
-    # For merged video+audio downloads yt-dlp runs two sequential streams.
-    # We weight them 70% (video) + 30% (audio) for a smooth overall progress.
-    stream_index = [0]   # mutable counter via list
+def run_download_thread(download_id, url, format_id, output_path, is_audio):
+    stream_index   = [0]
     stream_weights = [70, 30] if not is_audio else [100]
 
     def progress_hook(d):
@@ -97,16 +88,11 @@ def run_download_thread(download_id: str, url: str, format_id: str, output_path:
         if d["status"] == "downloading":
             downloaded = d.get("downloaded_bytes") or 0
             total      = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-
-            # Per-stream percent (0-100)
             stream_pct = (downloaded / total * 100) if total > 0 else 0
 
-            # Overall percent weighted across streams
-            offset = sum(stream_weights[:stream_index[0]])
-            weight = stream_weights[stream_index[0]] if stream_index[0] < len(stream_weights) else 0
-            overall_pct = offset + (stream_pct / 100 * weight)
-            # Cap at 99 — 100 is reserved for truly done
-            overall_pct = min(round(overall_pct, 1), 99)
+            offset      = sum(stream_weights[:stream_index[0]])
+            weight      = stream_weights[stream_index[0]] if stream_index[0] < len(stream_weights) else 0
+            overall_pct = min(round(offset + (stream_pct / 100 * weight), 1), 99)
 
             progress_store[download_id] = {
                 **entry,
@@ -117,7 +103,6 @@ def run_download_thread(download_id: str, url: str, format_id: str, output_path:
             }
 
         elif d["status"] == "finished":
-            # One stream finished — advance to next
             stream_index[0] += 1
             progress_store[download_id] = {
                 **entry,
@@ -130,13 +115,8 @@ def run_download_thread(download_id: str, url: str, format_id: str, output_path:
     try:
         download_video(url, format_id, output_path, progress_hook=progress_hook)
 
-        # Resolve the actual file path on disk
-        if is_audio:
-            final_path = output_path + ".mp3"
-            final_ext  = "mp3"
-        else:
-            final_path = output_path
-            final_ext  = "mp4"
+        final_path = output_path + ".mp3" if is_audio else output_path
+        final_ext  = "mp3" if is_audio else "mp4"
 
         if not os.path.exists(final_path):
             candidates = [
@@ -153,9 +133,9 @@ def run_download_thread(download_id: str, url: str, format_id: str, output_path:
 
         if not os.path.exists(final_path):
             progress_store[download_id] = {
-                "status": "error",
+                "status":  "error",
                 "percent": 0,
-                "error": "File not found after processing. Make sure FFmpeg is installed.",
+                "error":   "File not found after processing. Make sure FFmpeg is installed.",
             }
             return
 
@@ -168,7 +148,6 @@ def run_download_thread(download_id: str, url: str, format_id: str, output_path:
             "file_ext":  final_ext,
         }
 
-        # Schedule cleanup
         threading.Thread(target=cleanup_file, args=(final_path,), daemon=True).start()
 
     except Exception as e:
@@ -179,7 +158,12 @@ def run_download_thread(download_id: str, url: str, format_id: str, output_path:
         }
 
 
-# ── routes ─────────────────────────────────────────────────────────
+# ── Routes ─────────────────────────────────────────────────────────
+
+@app.get("/")
+async def root():
+    return {"status": "QuickTube API is running ✅"}
+
 
 @app.post("/get-info")
 async def fetch_info(request: URLRequest):
@@ -191,16 +175,15 @@ async def fetch_info(request: URLRequest):
 
 @app.post("/download")
 async def start_download(request: DownloadRequest):
-    """Kick off a background download and immediately return a download_id."""
-    file_id   = str(uuid.uuid4())
-    is_audio  = "Audio" in request.format_id or "bestaudio" in request.format_id
+    file_id  = str(uuid.uuid4())
+    is_audio = "Audio" in request.format_id or "bestaudio" in request.format_id
 
-    if is_audio:
-        output_path = os.path.join(DOWNLOADS_DIR, file_id)       # no ext; FFmpeg adds .mp3
-    else:
-        output_path = os.path.join(DOWNLOADS_DIR, f"{file_id}.mp4")
+    output_path = (
+        os.path.join(DOWNLOADS_DIR, file_id)
+        if is_audio
+        else os.path.join(DOWNLOADS_DIR, f"{file_id}.mp4")
+    )
 
-    # Initialise progress entry
     progress_store[file_id] = {
         "status":  "starting",
         "percent": 0,
@@ -209,28 +192,23 @@ async def start_download(request: DownloadRequest):
         "title":   request.title,
     }
 
-    # Start download in a daemon thread so the response returns immediately
-    t = threading.Thread(
+    threading.Thread(
         target=run_download_thread,
         args=(file_id, request.url, request.format_id, output_path, is_audio),
         daemon=True,
-    )
-    t.start()
+    ).start()
 
     return {"download_id": file_id}
 
 
 @app.get("/progress/{download_id}")
 async def stream_progress(download_id: str):
-    """Server-Sent Events endpoint that streams download progress."""
-
     async def event_generator():
         sent_done = False
         while not sent_done:
             entry = progress_store.get(download_id)
             if entry is None:
-                data = json.dumps({"status": "not_found"})
-                yield f"data: {data}\n\n"
+                yield f"data: {json.dumps({'status': 'not_found'})}\n\n"
                 break
 
             yield f"data: {json.dumps(entry)}\n\n"
@@ -239,13 +217,13 @@ async def stream_progress(download_id: str):
                 sent_done = True
                 break
 
-            await asyncio.sleep(0.5)   # poll every 500 ms
+            await asyncio.sleep(0.5)
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control":    "no-cache",
             "X-Accel-Buffering": "no",
         },
     )
@@ -253,7 +231,6 @@ async def stream_progress(download_id: str):
 
 @app.get("/file/{download_id}")
 async def serve_file(download_id: str):
-    """Serve the completed file for download."""
     entry = progress_store.get(download_id, {})
     if entry.get("status") != "done":
         raise HTTPException(status_code=404, detail="File not ready or not found.")
@@ -264,24 +241,17 @@ async def serve_file(download_id: str):
     if not os.path.exists(final_path):
         raise HTTPException(status_code=404, detail="File has been cleaned up or does not exist.")
 
-    media_type = "video/mp4" if final_ext == "mp4" else "audio/mpeg"
-    
-    # Sanitize title for filename
-    raw_title = entry.get("title", "QuickTube_Video")
-    clean_title = "".join([c for c in raw_title if c.isalnum() or c in (" ", ".", "_", "-")]).strip()
+    media_type  = "video/mp4" if final_ext == "mp4" else "audio/mpeg"
+    raw_title   = entry.get("title", "QuickTube_Video")
+    clean_title = "".join(c for c in raw_title if c.isalnum() or c in (" ", ".", "_", "-")).strip()
     if not clean_title:
         clean_title = f"QuickTube_{download_id}"
-        
+
     return FileResponse(
         path=final_path,
         filename=f"{clean_title}.{final_ext}",
         media_type=media_type,
     )
-
-
-@app.get("/")
-async def root():
-    return {"status": "QuickTube API is running"}
 
 
 if __name__ == "__main__":
