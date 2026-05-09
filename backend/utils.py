@@ -15,7 +15,7 @@ def _clean(s: str) -> str:
 # preserve newlines when pasting into Render's environment variable editor.
 # Falls back to raw text (YOUTUBE_COOKIES) if B64 version is not set.
 
-COOKIES_FILE = '/tmp/yt_cookies.txt'
+COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cookies.txt')
 _cookies_ready = False
 
 def _setup_cookies():
