@@ -16,16 +16,10 @@ load_dotenv()
 
 app = FastAPI(title="QuickTube API")
 
-# CORS configuration
-origins_env = os.getenv("ALLOWED_ORIGINS", "*")
-allowed_origins = [o.strip() for o in origins_env.split(",") if o.strip()]
-if not allowed_origins:
-    allowed_origins = ["*"]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_origins=["*"],  # allows all origins
+    allow_credentials=False,  # must be False when using wildcard
     allow_methods=["*"],
     allow_headers=["*"],
 )
